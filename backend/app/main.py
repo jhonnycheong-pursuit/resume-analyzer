@@ -7,12 +7,13 @@ from langchain.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.embeddings import OpenAIEmbeddings
 from langchain.vectorstores import Chroma
-from langchain.chains import RetrievalQA
+from langchain.chains import RetrievalQA, LLMChain
 from langchain.llms import OpenAI
 from langchain.prompts import PromptTemplate
 from langchain.chains.constitutional_ai.base import ConstitutionalChain
 from langchain.chains.constitutional_ai.models import ConstitutionalPrinciple
 import tempfile
+import chromadb
 
 # Load environment variables from .env file
 load_dotenv()
@@ -46,6 +47,15 @@ def load_and_index_resume(pdf_file_path: str):
         Chroma: A Chroma vector store containing the indexed resume content.
     """
     logging.info(f"Loading and indexing resume from: {pdf_file_path}")
+
+    # Define the directory for Chroma storage
+    chroma_storage_dir = "./chroma_storage"
+
+    # Ensure the directory exists
+    if not os.path.exists(chroma_storage_dir):
+        os.makedirs(chroma_storage_dir)
+        logging.info(f"Created directory for Chroma storage: {chroma_storage_dir}")
+
     try:
         loader = PyPDFLoader(pdf_file_path)
         documents = loader.load()
@@ -61,8 +71,15 @@ def load_and_index_resume(pdf_file_path: str):
         embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
 
     global vectorstore
-    vectorstore = Chroma.from_documents(texts, embeddings)
-    logging.info("Resume indexed successfully.")
+    try:
+        vectorstore = Chroma.from_documents(
+            texts, embeddings, persist_directory=chroma_storage_dir
+        )
+        logging.info("Resume indexed successfully.")
+    except Exception as e:
+        logging.error(f"Error initializing Chroma vectorstore: {e}")
+        return None
+
     return vectorstore
 
 def create_qa_chain(vector_store: Chroma):
@@ -111,12 +128,36 @@ def create_constitutional_chain(llm: OpenAI):
         ConstitutionalChain: A Langchain ConstitutionalChain.
     """
     logging.info("Creating ConstitutionalChain for AI validation.")
+
     # Define principles for helpful and harmless output
     principles = [
-        ConstitutionalPrinciple(name="Helpful", text="The AI should provide helpful and relevant feedback."),
-        ConstitutionalPrinciple(name="Harmless", text="The AI should avoid generating harmful, unethical, or biased feedback."),
+        ConstitutionalPrinciple(
+            name="Helpful",
+            text="The AI should provide helpful and relevant feedback.",
+            critique_request="What could be improved in this response to make it more helpful?",
+            revision_request="Revise the response to make it more helpful."
+        ),
+        ConstitutionalPrinciple(
+            name="Harmless",
+            text="The AI should avoid generating harmful, unethical, or biased feedback.",
+            critique_request="What could be improved in this response to make it less harmful?",
+            revision_request="Revise the response to make it less harmful."
+        ),
     ]
-    constitutional_chain = ConstitutionalChain.from_llm(llm=llm, constitutional_principles=principles)
+
+    # Create a base chain using LLMChain
+    prompt = PromptTemplate(
+        input_variables=["query"],
+        template="Answer the following question: {query}"
+    )
+    base_chain = LLMChain(llm=llm, prompt=prompt)
+
+    # Create the ConstitutionalChain
+    constitutional_chain = ConstitutionalChain.from_llm(
+        llm=llm,
+        chain=base_chain,
+        constitutional_principles=principles
+    )
     logging.info("ConstitutionalChain created.")
     return constitutional_chain
 
